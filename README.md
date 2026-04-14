@@ -42,9 +42,11 @@ cp .env.example .env
 | `ELASTICSEARCH_CA_CERT` | Path to CA cert (default: `config/cert/elasticsearch_ca.crt`) |
 | `JWT_SECRET` | Long, random secret for JWT signing |
 | `CORS_ORIGINS` | Comma-separated allowed origins (e.g. `http://localhost:3000`) |
+| `FRONTEND_URL` | Base URL for links included in email templates (e.g. `https://app.yourdomain.com`) |
 | `GITHUB_CLIENT_ID` | OAuth — GitHub App client ID |
 | `GITHUB_CLIENT_SECRET` | OAuth — GitHub App client secret |
 | `GITLAB_CLIENT_ID` | OAuth — GitLab App client ID |
+| `GITLAB_CLIENT_SECRET` | OAuth — GitLab App client secret |
 | `GITLAB_REDIRECT_URI` | OAuth — GitLab redirect URI |
 
 ### Elasticsearch TLS / Secure Connection
@@ -79,12 +81,13 @@ See [deployment.md](deployment.md) for the full production guide including Docke
 
 | Prefix | Description |
 |---|---|
-| `/api/auth` | Login, signup, OAuth, password reset |
+| `/api/auth` | Login, signup, OAuth (GitHub/GitLab), email lookup, password reset |
 | `/api/projects` | Project management, API key rotation |
 | `/api/channels` | Channel management |
 | `/api/logs` | Log ingestion (single, batch, GELF, agent) and querying |
 | `/api/settings` | App settings, SMTP, alert rules, agent keys |
 | `/api/roles` | User management and permissions |
+| `/api/invitations` | Invitation lifecycle (create, resend, delete) |
 | `/api/ws/logs` | WebSocket — real-time log streaming |
 | `/api/setup` | Initial onboarding |
 
@@ -92,6 +95,8 @@ See [deployment.md](deployment.md) for the full production guide including Docke
 
 ### Core Platform
 - **Interactive Onboarding** — Secure 3-step setup flow for initial configuration and administrator creation with live preview
+- **Multi-Company Support** — The same email address can belong to multiple independent companies, each with isolated data, separate credentials, and independent roles. A compound unique index `(email, company_id)` enforces per-company uniqueness.
+- **3-Step Login Flow** — `/auth/email-lookup` resolves which workspaces an email belongs to; the user selects their workspace before entering their password, enabling distinct credentials per company
 - **Multi-Project Management** — Separate logs by application with dedicated API keys per project
 - **Logical Channels** — Segment logs within a project (e.g. `auth`, `billing`, `worker`)
 - **Powerful Log Explorer** — Full-text search, filtering by level, channel, project, tags, and time range
@@ -106,7 +111,7 @@ See [deployment.md](deployment.md) for the full production guide including Docke
 - **Batch HTTP Ingestion** — `POST /api/logs/ingest/batch` for high-throughput clients
 - **GELF Protocol Support** — Native ingestion via HTTP and UDP (port 12201), compatible with Docker, Fluentd, and Graylog shippers
 - **Docker Agent** — Platform-wide log collection for all Docker containers with no code modification; intelligent label-based routing per project and channel
-- **Official SDKs (v0.1.9)** — `npm install @loickadj/logforge-js` and `pip install logforge-py[requests]`; both support batch ingestion, retry logic, user context, and exception capture
+- **Official SDKs** — `npm install @loickadj/logforge-js` and `pip install logforge-py[requests]`; both support batch ingestion, retry logic, user context, and exception capture
 
 ### Alerting & Notifications
 - **Alerting System** — Configure email notification rules (SMTP) based on log severity
@@ -115,13 +120,20 @@ See [deployment.md](deployment.md) for the full production guide including Docke
 - **Agent Key Expiration Alerts** — Automated email notifications before agent keys expire
 
 ### User & Access Management
+- **Invitation System** — Administrators invite users by email; invitation links expire after 24 hours and are scoped to a specific company
 - **Granular RBAC** — Distinct Admin and Member roles; administrators dynamically assign, revoke, and manage per-project access
+- **Permission Guards** — Fine-grained permission flags (e.g. `view_docker_logs`, `manage_smtp`) assignable per member
 - **Administrative User Management** — Enable, disable, and manage user accounts from the global settings panel
 - **Unified User Management UI** — Single high-performance table with dedicated modal controls for permissions
-- **Admin Password Recovery** — "Contact Administrator" flow for members; dedicated CLI recovery script for system administrators
+- **Admin Password Recovery** — Administrator-triggered password reset via email; dedicated CLI recovery script for system administrators
 - **Global Notification Preferences** — Administrators define which administrative events trigger emails (role changes, account activation/deactivation, etc.)
 - **Automated Access Notifications** — Instant email notifications via SMTP when access or permissions are granted or revoked
-- **Social Login (OAuth)** — Secure sign-in via GitHub and GitLab
+- **Social Login (OAuth)** — Secure sign-in via GitHub and GitLab; multi-company users are redirected to the 3-step email/password flow
+
+### Multi-Tenancy
+- **Complete Data Isolation** — Every MongoDB and Elasticsearch query is scoped by `company_id`. Users, projects, channels, logs, alert rules, agent keys, settings, and invitations are all fully isolated per company
+- **`company_id` Derivation Chain** — Authenticated endpoints derive `company_id` from the JWT → user document; API-key endpoints derive it from the project document; agent-key endpoints derive it from the agent key document
+- **Compound Unique Index** — `(email, company_id)` enforces per-company uniqueness while allowing the same email across companies
 
 ### Customisation & UX
 - **Dynamic App Customisation** — Upload a logo, set an application name, and pick a brand primary color from the Settings panel
@@ -155,25 +167,50 @@ Stress test results (100k logs, 200 parallel workers):
 
 ## Log Ingestion Protocols
 
-- **HTTP** — `POST /api/logs/ingest` (single) and `POST /api/logs/ingest/batch`
-- **GELF HTTP** — `POST /api/logs/gelf`
-- **GELF UDP** — port `12201`
-- **Docker Agent** — `POST /api/logs/ingest/agent`
+| Protocol | Endpoint | Notes |
+|---|---|---|
+| HTTP single | `POST /api/logs/ingest` | Requires `X-API-Key` header |
+| HTTP batch | `POST /api/logs/ingest/batch` | Up to 1000 logs per request |
+| GELF HTTP | `POST /api/logs/gelf` | Requires `X-API-Key` header |
+| GELF UDP | port `12201` | Standard GELF UDP datagram |
+| Docker Agent | `POST /api/logs/ingest/agent` | Requires `Authorization: Bearer lfa_...` agent key |
+
+## Authentication
+
+| Method | Endpoint | Notes |
+|---|---|---|
+| Email lookup | `POST /api/auth/email-lookup` | Resolves companies for an email (no password required) |
+| Login | `POST /api/auth/login` | Requires `email`, `password`, and `company_id` |
+| Signup | `POST /api/auth/signup` | Requires a valid invitation token |
+| GitHub OAuth | `GET /api/auth/github` + `/api/auth/github/callback` | Single-company emails only |
+| GitLab OAuth | `GET /api/auth/gitlab` + `/api/auth/gitlab/callback` | Single-company emails only |
+| Password reset | `POST /api/auth/forgot-password` / `POST /api/auth/reset-password` | Admin-triggered via `/api/roles/users/{id}/reset-password` |
 
 ## Project Structure
 
 ```
 logforge-backend/
-├── routes/         # Auth, logs, projects, channels, settings, roles
-├── utils/          # Email, GELF helpers
-├── templates/      # HTML email templates
-├── scripts/        # CLI utilities (reset admin password, agent key notifier)
-├── tests/          # Integration tests and load scripts
-├── server.py       # FastAPI app entry point
-├── database.py     # MongoDB client
-├── es_client.py    # Elasticsearch / OpenSearch client
-├── ws_manager.py   # WebSocket connection manager
-└── auth.py         # JWT and password hashing
+├── routes/
+│   ├── auth_routes.py       # Login, signup, OAuth, email lookup, password reset
+│   ├── project_routes.py    # Project CRUD and API key management
+│   ├── channel_routes.py    # Channel CRUD
+│   ├── log_routes.py        # Log ingestion, querying, Docker logs, replays
+│   ├── settings_routes.py   # App settings, SMTP, alert rules, agent keys
+│   ├── roles_routes.py      # User management and RBAC
+│   └── invitation_routes.py # Invitation lifecycle
+├── utils/
+│   ├── email_utils.py       # SMTP helpers and HTML email templates
+│   └── gelf.py              # GELF UDP protocol handler
+├── templates/               # Jinja2 HTML email templates
+├── scripts/
+│   ├── reset_admin_password.py   # CLI: reset admin password
+│   └── agent_key_notifier.py     # Background: agent key expiry alerts
+├── tests/                   # Integration tests and load scripts
+├── server.py                # FastAPI app entry point and lifespan
+├── database.py              # MongoDB async client
+├── es_client.py             # Elasticsearch / OpenSearch client + query builder
+├── ws_manager.py            # WebSocket connection manager
+└── auth.py                  # JWT, password hashing, auth dependencies
 ```
 
 ## License

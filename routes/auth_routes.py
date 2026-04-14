@@ -1,9 +1,10 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
+from typing import Optional
 from datetime import datetime, timezone
 import uuid
 import os
-import requests as http_requests
+import httpx
 
 from database import db
 from auth import hash_password, verify_password, create_token, get_current_user
@@ -15,11 +16,13 @@ class SignupRequest(BaseModel):
     email: str
     password: str
     name: str
+    invitation_token: str
 
 
 class LoginRequest(BaseModel):
     email: str
     password: str
+    company_id: Optional[str] = None
 
 
 class UserResponse(BaseModel):
@@ -54,44 +57,132 @@ class ResetPasswordRequest(BaseModel):
     new_password: str
 
 
-@router.post("/signup", 
-             response_model=AuthResponse, 
-             summary="User Signup", 
-             description="Register a new user with an email and password. Returns an access token and user profile.")
+@router.get("/invite/validate/{token}",
+            summary="Validate Invitation Token",
+            description="Validates an invitation token and returns the associated email and company name.")
+async def validate_invitation(token: str):
+    from datetime import datetime, timezone
+    inv = await db.invitations.find_one({"token": token, "status": "pending"}, {"_id": 0})
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invitation not found or already used.")
+    # Check expiry
+    expires_at = datetime.fromisoformat(inv["expires_at"])
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) > expires_at:
+        await db.invitations.update_one({"token": token}, {"$set": {"status": "expired"}})
+        raise HTTPException(status_code=410, detail="Invitation link has expired.")
+    return {
+        "email": inv["email"],
+        "company_name": inv["company_name"],
+        "company_id": inv["company_id"],
+    }
+
+
+@router.post("/signup",
+             response_model=AuthResponse,
+             summary="User Signup",
+             description="Register a new user via a valid company invitation token.")
 async def signup(req: SignupRequest):
-    existing = await db.users.find_one({"email": req.email})
+    from datetime import datetime, timezone
+
+    # --- Validate invitation token ---
+    inv = await db.invitations.find_one({"token": req.invitation_token, "status": "pending"}, {"_id": 0})
+    if not inv:
+        raise HTTPException(status_code=400, detail="Invalid or already used invitation token.")
+
+    expires_at = datetime.fromisoformat(inv["expires_at"])
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) > expires_at:
+        await db.invitations.update_one({"token": req.invitation_token}, {"$set": {"status": "expired"}})
+        raise HTTPException(status_code=410, detail="Invitation link has expired.")
+
+    # Email must match the one that was invited
+    if req.email.strip().lower() != inv["email"].strip().lower():
+        raise HTTPException(status_code=400, detail="Email does not match the invitation.")
+
+    existing = await db.users.find_one({"email": req.email, "company_id": inv["company_id"]})
     if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
+        raise HTTPException(status_code=400, detail="Email already registered in this company.")
 
     user_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     user_doc = {
-        "id": user_id, "email": req.email,
+        "id": user_id,
+        "email": req.email,
         "password": hash_password(req.password),
-        "name": req.name, "created_at": now,
-        "theme": "dark", "auth_provider": "email",
-        "role": "member", "permissions": [],
+        "name": req.name,
+        "created_at": now,
+        "theme": "dark",
+        "auth_provider": "email",
+        "role": "member",
+        "permissions": [],
         "allowed_projects": [],
         "dashboard_config": {},
-        "is_active": True
+        "is_active": True,
+        "company_id": inv["company_id"],
     }
     await db.users.insert_one(user_doc)
+
+    # Mark invitation as accepted
+    await db.invitations.update_one(
+        {"token": req.invitation_token},
+        {"$set": {"status": "accepted"}}
+    )
+
     token = create_token(user_id)
     return AuthResponse(
         access_token=token,
-        user=UserResponse(id=user_id, email=req.email, name=req.name, created_at=now, theme="dark", role="member", permissions=[], allowed_projects=[], dashboard_config={}, is_active=True)
+        user=UserResponse(
+            id=user_id, email=req.email, name=req.name, created_at=now,
+            theme="dark", role="member", permissions=[], allowed_projects=[],
+            dashboard_config={}, is_active=True
+        )
     )
 
 
-@router.post("/login", 
+@router.post("/email-lookup",
+             summary="Email Lookup",
+             description="Returns the list of companies associated with an email address, to be shown before password entry.")
+async def email_lookup(req: ForgotPasswordRequest):
+    """Step 1 of login: resolve which companies this email belongs to."""
+    users = await db.users.find({"email": req.email}, {"_id": 0, "company_id": 1}).to_list(100)
+    if not users:
+        # Don't reveal existence — always return same shape
+        return {"companies": []}
+
+    company_ids = [u.get('company_id') for u in users if u.get('company_id')]
+    if not company_ids:
+        return {"companies": []}
+
+    companies_docs = await db.companies.find(
+        {"id": {"$in": company_ids}}, {"_id": 0, "id": 1, "name": 1}
+    ).to_list(100)
+
+    return {"companies": [{"id": c['id'], "name": c['name']} for c in companies_docs]}
+
+
+@router.post("/login",
              response_model=AuthResponse,
              summary="User Login",
-             description="Authenticate with email and password. Returns a JWT access token.")
+             description="Authenticate with email, password, and company_id. Use /email-lookup first to resolve the company.")
 async def login(req: LoginRequest):
-    user = await db.users.find_one({"email": req.email}, {"_id": 0})
-    if not user or not verify_password(req.password, user['password']):
+    # Always require company_id — resolved via /email-lookup before this call
+    if not req.company_id:
+        # Fallback: if only one company for this email, auto-resolve
+        all_users = await db.users.find({"email": req.email}, {"_id": 0}).to_list(100)
+        if len(all_users) == 1:
+            req.company_id = all_users[0].get('company_id')
+        elif len(all_users) == 0:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        else:
+            raise HTTPException(status_code=400, detail="Multiple workspaces found. Please select a workspace first.")
+
+    user = await db.users.find_one({"email": req.email, "company_id": req.company_id}, {"_id": 0})
+    if not user or not verify_password(req.password, user.get('password', '')):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
+
     if not user.get('is_active', True):
         raise HTTPException(status_code=403, detail="Account is deactivated. Please contact an administrator.")
 
@@ -162,39 +253,44 @@ async def github_callback(code: str):
     if not client_id or not client_secret:
         raise HTTPException(status_code=501, detail="GitHub OAuth not configured")
 
-    token_resp = http_requests.post("https://github.com/login/oauth/access_token",
-        data={"client_id": client_id, "client_secret": client_secret, "code": code},
-        headers={"Accept": "application/json"})
-    access_token = token_resp.json().get("access_token")
-    if not access_token:
-        raise HTTPException(status_code=400, detail="Failed to get GitHub access token")
+    async with httpx.AsyncClient() as client:
+        token_resp = await client.post(
+            "https://github.com/login/oauth/access_token",
+            data={"client_id": client_id, "client_secret": client_secret, "code": code},
+            headers={"Accept": "application/json"})
+        access_token = token_resp.json().get("access_token")
+        if not access_token:
+            raise HTTPException(status_code=400, detail="Failed to get GitHub access token")
 
-    user_resp = http_requests.get("https://api.github.com/user",
-        headers={"Authorization": f"Bearer {access_token}"})
-    gh_user = user_resp.json()
+        user_resp = await client.get(
+            "https://api.github.com/user",
+            headers={"Authorization": f"Bearer {access_token}"})
+        gh_user = user_resp.json()
 
-    email_resp = http_requests.get("https://api.github.com/user/emails",
-        headers={"Authorization": f"Bearer {access_token}"})
-    emails = email_resp.json()
+        email_resp = await client.get(
+            "https://api.github.com/user/emails",
+            headers={"Authorization": f"Bearer {access_token}"})
+        emails = email_resp.json()
+
     primary_email = next((e['email'] for e in emails if e.get('primary')), gh_user.get('email', ''))
 
-    user = await db.users.find_one({"email": primary_email}, {"_id": 0})
-    if not user:
-        user_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
-        user = {
-            "id": user_id, "email": primary_email, "password": "",
-            "name": gh_user.get('name', gh_user.get('login', '')),
-            "created_at": now,
-            "auth_provider": "github",
-            "theme": "dark",
-            "role": "member",
-            "permissions": [],
-            "allowed_projects": [],
-            "dashboard_config": {},
-            "is_active": True
-        }
-    await db.users.insert_one(user)
+    # Only allow existing users (invited via company invitation) to log in via OAuth.
+    # New users must sign up through an invitation link to be assigned a company_id.
+    users = await db.users.find({"email": primary_email}, {"_id": 0}).to_list(10)
+    if not users:
+        raise HTTPException(
+            status_code=403,
+            detail="No account found for this email. Please sign up using a company invitation link."
+        )
+    if len(users) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Multiple workspaces found for this email. Please use email/password login to select your workspace."
+        )
+
+    user = users[0]
+    if not user.get('is_active', True):
+        raise HTTPException(status_code=403, detail="Account is deactivated. Please contact an administrator.")
 
     token = create_token(user['id'])
     return AuthResponse(
@@ -224,33 +320,39 @@ async def gitlab_callback(code: str):
         raise HTTPException(status_code=501, detail="GitLab OAuth not configured")
 
     redirect_uri = os.environ.get('GITLAB_REDIRECT_URI', '')
-    token_resp = http_requests.post("https://gitlab.com/oauth/token",
-        data={"client_id": client_id, "client_secret": client_secret,
-              "code": code, "grant_type": "authorization_code", "redirect_uri": redirect_uri})
-    access_token = token_resp.json().get("access_token")
-    if not access_token:
-        raise HTTPException(status_code=400, detail="Failed to get GitLab access token")
+    async with httpx.AsyncClient() as client:
+        token_resp = await client.post(
+            "https://gitlab.com/oauth/token",
+            data={"client_id": client_id, "client_secret": client_secret,
+                  "code": code, "grant_type": "authorization_code", "redirect_uri": redirect_uri})
+        access_token = token_resp.json().get("access_token")
+        if not access_token:
+            raise HTTPException(status_code=400, detail="Failed to get GitLab access token")
 
-    user_resp = http_requests.get("https://gitlab.com/api/v4/user",
-        headers={"Authorization": f"Bearer {access_token}"})
-    gl_user = user_resp.json()
+        user_resp = await client.get(
+            "https://gitlab.com/api/v4/user",
+            headers={"Authorization": f"Bearer {access_token}"})
+        gl_user = user_resp.json()
+
     email = gl_user.get('email', '')
 
-    user = await db.users.find_one({"email": email}, {"_id": 0})
-    if not user:
-        user_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
-        user = {
-            "id": user_id, "email": email, "password": "",
-            "name": gl_user.get('name', gl_user.get('username', '')),
-            "created_at": now, "theme": "dark",
-            "auth_provider": "gitlab", "gitlab_id": str(gl_user.get('id', '')),
-            "role": "member", "permissions": [],
-            "allowed_projects": [],
-            "dashboard_config": {},
-            "is_active": True
-        }
-        await db.users.insert_one(user)
+    # Only allow existing users (invited via company invitation) to log in via OAuth.
+    # New users must sign up through an invitation link to be assigned a company_id.
+    users = await db.users.find({"email": email}, {"_id": 0}).to_list(10)
+    if not users:
+        raise HTTPException(
+            status_code=403,
+            detail="No account found for this email. Please sign up using a company invitation link."
+        )
+    if len(users) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Multiple workspaces found for this email. Please use email/password login to select your workspace."
+        )
+
+    user = users[0]
+    if not user.get('is_active', True):
+        raise HTTPException(status_code=403, detail="Account is deactivated. Please contact an administrator.")
 
     token = create_token(user['id'])
     return AuthResponse(
@@ -272,9 +374,10 @@ async def forgot_password(req: ForgotPasswordRequest):
         # For security, don't reveal if user exists
         return {"message": "If your email is registered, you will receive a reset link shortly."}
 
-    # Check if SMTP is configured
+    # Check if SMTP is configured (company-scoped)
+    company_id = user.get("company_id")
     from utils.email_utils import get_smtp_config, send_password_reset_email
-    smtp = await get_smtp_config()
+    smtp = await get_smtp_config(company_id)
     if not smtp or not smtp.get('enabled', False):
         raise HTTPException(status_code=503, detail="Password recovery is not configured on this server. Please contact an administrator.")
 
@@ -283,7 +386,7 @@ async def forgot_password(req: ForgotPasswordRequest):
     from datetime import datetime, timezone, timedelta
     token = secrets.token_urlsafe(32)
     expiry = datetime.now(timezone.utc) + timedelta(hours=1)
-    
+
     await db.users.update_one(
         {"id": user["id"]},
         {"$set": {
@@ -291,9 +394,9 @@ async def forgot_password(req: ForgotPasswordRequest):
             "reset_token_expiry": expiry.isoformat()
         }}
     )
-    
+
     # Send email
-    success = await send_password_reset_email(user["email"], user["name"], token)
+    success = await send_password_reset_email(user["email"], user["name"], token, company_id=company_id)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to send reset email. Please try again later.")
         
@@ -322,7 +425,6 @@ async def reset_password(req: ResetPasswordRequest):
         raise HTTPException(status_code=400, detail="Reset token has expired")
     
     # Update password and clear token
-    from auth import hash_password
     await db.users.update_one(
         {"id": user["id"]},
         {

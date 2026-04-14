@@ -56,7 +56,8 @@ class WebSocketManager:
         for conn in targets:
             try:
                 await conn.send_json(data)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"WebSocket send failed, disconnecting client: {e}")
                 disconnected.append(conn)
         
         for conn in disconnected:
@@ -68,7 +69,8 @@ class WebSocketManager:
         for conn in self.all_connections:
             try:
                 await conn.send_json(data)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"WebSocket send failed, disconnecting client: {e}")
                 disconnected.append(conn)
         
         for conn in disconnected:

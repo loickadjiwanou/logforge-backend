@@ -42,26 +42,26 @@ class ProjectListResponse(BaseModel):
     pages: int
 
 
-@router.get("/", 
+@router.get("/",
             response_model=ProjectListResponse,
             summary="List Projects",
             description="Retrieve a paginated list of projects accessible by the current user.")
 async def list_projects(page: int = Query(1, ge=1), size: int = Query(99, ge=1, le=100), user=Depends(get_current_user)):
-    query = {}
+    company_id = user.get("company_id")
+    query = {"company_id": company_id}
     if user.get('role') != 'admin':
-        # Members only see basic projects they explicitly own or are granted access to
-        query = {"$or": [
+        query["$or"] = [
             {"user_id": user['id']},
             {"id": {"$in": user.get('allowed_projects', [])}}
-        ]}
-    
+        ]
+
     total = await db.projects.count_documents(query)
     skip = (page - 1) * size
 
     projects = await db.projects.find(
         query, {"_id": 0}
     ).sort("created_at", -1).skip(skip).limit(size).to_list(length=size)
-    
+
     return {
         "projects": projects,
         "total": total,
@@ -71,7 +71,7 @@ async def list_projects(page: int = Query(1, ge=1), size: int = Query(99, ge=1, 
     }
 
 
-@router.post("/", 
+@router.post("/",
              response_model=ProjectResponse,
              summary="Create Project",
              description="Create a new project. Requires administrator privileges.")
@@ -86,6 +86,7 @@ async def create_project(req: ProjectCreate, admin=Depends(get_admin_user)):
         "environment": req.environment,
         "api_key": api_key,
         "user_id": admin['id'],
+        "company_id": admin.get("company_id"),
         "created_at": now
     }
     await db.projects.insert_one(project)
@@ -93,44 +94,46 @@ async def create_project(req: ProjectCreate, admin=Depends(get_admin_user)):
     return project
 
 
-@router.get("/{project_id}", 
+@router.get("/{project_id}",
             response_model=ProjectResponse,
             summary="Get Project Details",
             description="Retrieve detailed information about a specific project by its unique ID.")
 async def get_project(project_id: str, user=Depends(get_current_user)):
-    query = {"id": project_id}
+    company_id = user.get("company_id")
+    query = {"id": project_id, "company_id": company_id}
     if user.get('role') != 'admin':
         query["$or"] = [
             {"user_id": user['id']},
             {"id": {"$in": user.get('allowed_projects', [])}}
         ]
-        
+
     project = await db.projects.find_one(query, {"_id": 0})
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
 
 
-@router.put("/{project_id}", 
+@router.put("/{project_id}",
             response_model=ProjectResponse,
             summary="Update Project",
             description="Modify the details of an existing project.")
 async def update_project(project_id: str, req: ProjectUpdate, user=Depends(get_current_user)):
-    query = {"id": project_id}
+    company_id = user.get("company_id")
+    query = {"id": project_id, "company_id": company_id}
     if user.get('role') != 'admin':
         query["$or"] = [
             {"user_id": user['id']},
             {"id": {"$in": user.get('allowed_projects', [])}}
         ]
-        
+
     update_data = {k: v for k, v in req.model_dump().items() if v is not None}
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
-        
+
     result = await db.projects.update_one(query, {"$set": update_data})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Project not found")
-    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    project = await db.projects.find_one({"id": project_id, "company_id": company_id}, {"_id": 0})
     return project
 
 
@@ -138,10 +141,11 @@ async def update_project(project_id: str, req: ProjectUpdate, user=Depends(get_c
                summary="Delete Project",
                description="Permanently remove a project and all its associated channels. Requires 'delete_projects' permission.")
 async def delete_project(project_id: str, user=Depends(require_permission("delete_projects"))):
-    result = await db.projects.delete_one({"id": project_id, "user_id": user['id']})
+    company_id = user.get("company_id")
+    result = await db.projects.delete_one({"id": project_id, "company_id": company_id, "user_id": user['id']})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Project not found")
-    await db.channels.delete_many({"project_id": project_id})
+    await db.channels.delete_many({"project_id": project_id, "company_id": company_id})
     return {"message": "Project deleted"}
 
 
@@ -149,13 +153,14 @@ async def delete_project(project_id: str, user=Depends(require_permission("delet
              summary="Regenerate API Key",
              description="Revoke the current API key and generate a new one for the specified project.")
 async def regenerate_api_key(project_id: str, user=Depends(get_current_user)):
-    query = {"id": project_id}
+    company_id = user.get("company_id")
+    query = {"id": project_id, "company_id": company_id}
     if user.get('role') != 'admin':
         query["$or"] = [
             {"user_id": user['id']},
             {"id": {"$in": user.get('allowed_projects', [])}}
         ]
-        
+
     new_key = f"lv_{secrets.token_hex(24)}"
     result = await db.projects.update_one(
         query, {"$set": {"api_key": new_key}}

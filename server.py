@@ -21,6 +21,7 @@ from routes.channel_routes import router as channel_router
 from routes.log_routes import router as log_router, log_worker
 from routes.settings_routes import router as settings_router
 from routes.roles_routes import router as roles_router
+from routes.invitation_routes import router as invitation_router
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -42,11 +43,26 @@ async def lifespan(app: FastAPI):
     from scripts.agent_key_notifier import check_expiring_keys_loop
     notifier_task = asyncio.create_task(check_expiring_keys_loop())
 
-    await db.users.create_index("email", unique=True)
+    # Drop old global unique-email index if it exists (migration to per-company uniqueness)
+    try:
+        await db.users.drop_index("email_1")
+    except Exception:
+        pass
     await db.users.create_index("id", unique=True)
+    # Each email must be unique within a company, but the same email can exist across companies
+    await db.users.create_index([("email", 1), ("company_id", 1)], unique=True)
     await db.projects.create_index("id", unique=True)
     await db.projects.create_index("api_key", unique=True)
+    await db.projects.create_index([("company_id", 1), ("id", 1)])
     await db.channels.create_index("id", unique=True)
+    await db.channels.create_index([("company_id", 1), ("project_id", 1)])
+    await db.alert_rules.create_index([("company_id", 1), ("enabled", 1)])
+    await db.agent_keys.create_index([("company_id", 1), ("status", 1)])
+    await db.settings.create_index([("type", 1), ("company_id", 1)])
+    await db.companies.create_index("id", unique=True)
+    await db.companies.create_index("name", unique=True)
+    await db.invitations.create_index("token", unique=True)
+    await db.invitations.create_index([("company_id", 1), ("email", 1)])
 
     # App is now setup manually through /api/setup/admin
 
@@ -100,7 +116,7 @@ tags_metadata = [
 app = FastAPI(
     title="LogForge API",
     description=description,
-    version="0.1.8",
+    version="0.1.9",
     contact={
         "name": "LogForge Support",
         "url": "https://github.com/loickadjiwanou/logforge-backend",
@@ -126,11 +142,12 @@ app.include_router(channel_router, prefix="/api/channels", tags=["channels"])
 app.include_router(log_router, prefix="/api/logs", tags=["logs"])
 app.include_router(settings_router, prefix="/api/settings", tags=["settings"])
 app.include_router(roles_router, prefix="/api/roles", tags=["roles"])
+app.include_router(invitation_router, prefix="/api/invitations", tags=["invitations"])
 
 
 @app.get("/api")
 async def root():
-    return {"message": "LogForge API", "status": "running", "version": "0.1.8"}
+    return {"message": "LogForge API", "status": "running", "version": "0.1.9"}
 
 
 @app.get("/api/health")
@@ -147,6 +164,7 @@ class SetupAdminRequest(BaseModel):
     name: str
     email: str
     password: str
+    company_name: str
     app_name: str = "LogForge"
     primary_color: str = "#10b981"
     theme: str = "dark"
@@ -160,12 +178,33 @@ async def get_setup_status():
 
 @app.post("/api/setup/admin")
 async def setup_admin(req: SetupAdminRequest):
-    if await is_app_setup():
-        raise HTTPException(status_code=400, detail="App is already setup")
-
+    from fastapi import HTTPException as _HTTPException
     from datetime import datetime, timezone
     import uuid
+
+    # Company name must be unique across all companies
+    existing_company = await db.companies.find_one({"name": req.company_name})
+    if existing_company:
+        raise _HTTPException(status_code=400, detail="A company with this name already exists. Please choose a different name.")
+
+    # Admin email must not already be registered
+    existing_user = await db.users.find_one({"email": req.email})
+    if existing_user:
+        raise _HTTPException(status_code=400, detail="This email is already registered.")
+
     now = datetime.now(timezone.utc).isoformat()
+
+    # Create company first
+    company_id = str(uuid.uuid4())
+    company_doc = {
+        "id": company_id,
+        "name": req.company_name,
+        "created_at": now,
+    }
+    await db.companies.insert_one(company_doc)
+    logger.info(f"Company created during setup: {req.company_name} (id={company_id})")
+
+    # Create admin user linked to this company
     admin_doc = {
         "id": str(uuid.uuid4()),
         "email": req.email,
@@ -177,29 +216,36 @@ async def setup_admin(req: SetupAdminRequest):
         "role": "admin",
         "permissions": [],
         "allowed_projects": [],
-        "dashboard_config": {}
+        "dashboard_config": {},
+        "company_id": company_id,
+        "is_active": True,
     }
     await db.users.insert_one(admin_doc)
-    logger.info(f"Admin account created during setup: {req.email}")
+    logger.info(f"Admin account created during setup: {req.email} for company {req.company_name}")
 
-    # Save App Settings
+    # Save App Settings scoped to this company
     await db.settings.update_one(
-        {"type": "app_settings"},
+        {"type": "app_settings", "company_id": company_id},
         {"$set": {
             "type": "app_settings",
+            "company_id": company_id,
             "app_name": req.app_name,
             "primary_color": req.primary_color,
             "logo_url": None,
-            "language": "en"
+            "language": "en",
+            "notify_role_change": True,
+            "notify_project_access": True,
+            "notify_permission_change": True,
+            "notify_status_change": True,
+            "material_mode": False
         }},
         upsert=True
     )
-    logger.info(f"App settings initialized during setup: {req.app_name}")
-    
+    logger.info(f"App settings initialized during setup: {req.app_name} (company={company_id})")
+
     from auth import create_token
     access_token = create_token(admin_doc["id"])
-    
-    # Return user info similar to login response
+
     from routes.auth_routes import UserResponse
     user_data = UserResponse(
         id=admin_doc["id"],
@@ -212,9 +258,9 @@ async def setup_admin(req: SetupAdminRequest):
         allowed_projects=admin_doc["allowed_projects"],
         dashboard_config=admin_doc["dashboard_config"]
     )
-    
+
     return {
-        "message": "Admin account created successfully",
+        "message": "Company and admin account created successfully",
         "access_token": access_token,
         "token_type": "bearer",
         "user": user_data.model_dump()

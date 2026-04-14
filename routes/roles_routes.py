@@ -45,15 +45,17 @@ class UserListResponse(BaseModel):
     pages: int
 
 
-@router.get("/users", 
+@router.get("/users",
             response_model=UserListResponse,
             summary="List Users and Roles",
-            description="Retrieve a paginated list of all users and their associated roles and permissions. Administrator access required.")
+            description="Retrieve a paginated list of all users in the current company. Administrator access required.")
 async def list_users(page: int = Query(1, ge=1), size: int = Query(99, ge=1, le=200), admin=Depends(get_admin_user)):
-    """List all users with their roles and permissions. Admin only."""
-    total = await db.users.count_documents({})
+    """List all users in the admin's company. Admin only."""
+    company_id = admin.get("company_id")
+    query = {"company_id": company_id}
+    total = await db.users.count_documents(query)
     skip = (page - 1) * size
-    users = await db.users.find({}, {"_id": 0, "password": 0}).skip(skip).limit(size).to_list(length=size)
+    users = await db.users.find(query, {"_id": 0, "password": 0}).skip(skip).limit(size).to_list(length=size)
     # Normalize role/permissions for users that predate RBAC
     result = []
     for u in users:
@@ -82,8 +84,9 @@ async def list_users(page: int = Query(1, ge=1), size: int = Query(99, ge=1, le=
               summary="Update User Role/Permissions",
               description="Update the role, permissions, or project access for a specific user. Sends notification emails to the user. Administrator access required.")
 async def update_user_role(user_id: str, req: UserRoleUpdate, background_tasks: BackgroundTasks, admin=Depends(get_admin_user)):
-    """Update a user's role and/or permissions. Admin only."""
-    target = await db.users.find_one({"id": user_id}, {"_id": 0})
+    """Update a user's role and/or permissions. Admin only, company-scoped."""
+    company_id = admin.get("company_id")
+    target = await db.users.find_one({"id": user_id, "company_id": company_id}, {"_id": 0})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -98,7 +101,8 @@ async def update_user_role(user_id: str, req: UserRoleUpdate, background_tasks: 
                 target['email'],
                 target.get('name', target['email']),
                 req.role,
-                performer_name=admin.get('name')
+                performer_name=admin.get('name'),
+                company_id=company_id
             )
         update_data["role"] = req.role
 
@@ -121,9 +125,10 @@ async def update_user_role(user_id: str, req: UserRoleUpdate, background_tasks: 
                 target.get('name', target['email']),
                 perm_key,
                 "granted",
-                performer_name=admin.get('name')
+                performer_name=admin.get('name'),
+                company_id=company_id
             )
-            
+
         for perm_key in removed_perms:
             background_tasks.add_task(
                 send_permission_change_email,
@@ -131,7 +136,8 @@ async def update_user_role(user_id: str, req: UserRoleUpdate, background_tasks: 
                 target.get('name', target['email']),
                 perm_key,
                 "revoked",
-                performer_name=admin.get('name')
+                performer_name=admin.get('name'),
+                company_id=company_id
             )
 
         update_data["permissions"] = new_perms_list
@@ -146,7 +152,7 @@ async def update_user_role(user_id: str, req: UserRoleUpdate, background_tasks: 
         
         # We'll send emails for each added/removed project
         for proj_id in added:
-            project = await db.projects.find_one({"id": proj_id})
+            project = await db.projects.find_one({"id": proj_id, "company_id": company_id})
             if project:
                 background_tasks.add_task(
                     send_project_access_email,
@@ -154,11 +160,12 @@ async def update_user_role(user_id: str, req: UserRoleUpdate, background_tasks: 
                     target.get('name', target['email']),
                     project['name'],
                     "granted",
-                    performer_name=admin.get('name')
+                    performer_name=admin.get('name'),
+                    company_id=company_id
                 )
-        
+
         for proj_id in removed:
-            project = await db.projects.find_one({"id": proj_id})
+            project = await db.projects.find_one({"id": proj_id, "company_id": company_id})
             if project:
                 background_tasks.add_task(
                     send_project_access_email,
@@ -166,7 +173,8 @@ async def update_user_role(user_id: str, req: UserRoleUpdate, background_tasks: 
                     target.get('name', target['email']),
                     project['name'],
                     "revoked",
-                    performer_name=admin.get('name')
+                    performer_name=admin.get('name'),
+                    company_id=company_id
                 )
 
         update_data["allowed_projects"] = new_projects_list
@@ -178,16 +186,17 @@ async def update_user_role(user_id: str, req: UserRoleUpdate, background_tasks: 
                 target['email'],
                 target.get('name', target['email']),
                 req.is_active,
-                performer_name=admin.get('name')
+                performer_name=admin.get('name'),
+                company_id=company_id
             )
         update_data["is_active"] = req.is_active
 
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    await db.users.update_one({"id": user_id}, {"$set": update_data})
+    await db.users.update_one({"id": user_id, "company_id": company_id}, {"$set": update_data})
 
-    updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    updated = await db.users.find_one({"id": user_id, "company_id": company_id}, {"_id": 0, "password": 0})
     return {
         "id": updated.get("id"),
         "name": updated.get("name"),
@@ -203,14 +212,15 @@ async def update_user_role(user_id: str, req: UserRoleUpdate, background_tasks: 
              summary="Trigger Password Reset Email",
              description="Allows an administrator to manually trigger a password reset email for a user. Administrator access required.")
 async def admin_trigger_reset(user_id: str, admin=Depends(get_admin_user)):
-    """Trigger a password reset email for a user. Admin only."""
-    user = await db.users.find_one({"id": user_id})
+    """Trigger a password reset email for a user. Admin only, company-scoped."""
+    company_id = admin.get("company_id")
+    user = await db.users.find_one({"id": user_id, "company_id": company_id})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     # Check if SMTP is configured
     from utils.email_utils import get_smtp_config
-    smtp = await get_smtp_config()
+    smtp = await get_smtp_config(company_id)
     if not smtp or not smtp.get('enabled', False):
         raise HTTPException(
             status_code=503, 
@@ -232,7 +242,7 @@ async def admin_trigger_reset(user_id: str, admin=Depends(get_admin_user)):
     )
     
     # Send email
-    success = await send_password_reset_email(user["email"], user["name"], token)
+    success = await send_password_reset_email(user["email"], user["name"], token, company_id=user.get("company_id"))
     if not success:
         raise HTTPException(status_code=500, detail="Failed to send reset email. Please check SMTP logs.")
         

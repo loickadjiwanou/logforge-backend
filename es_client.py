@@ -248,7 +248,7 @@ class LogStore:
                         dt_val = dt_val.replace(tzinfo=dt_timezone.utc)
                     range_q['gte'] = dt_val
                 except Exception as e:
-                    print(f"ERROR: Failed to parse date_from '{filters.get('date_from')}': {e}")
+                    logger.error(f"Failed to parse date_from '{filters.get('date_from')}': {e}")
                     range_q['gte'] = filters['date_from']
             if filters.get('date_to'):
                 try:
@@ -259,16 +259,20 @@ class LogStore:
                         dt_val = dt_val.replace(tzinfo=dt_timezone.utc)
                     range_q['lte'] = dt_val
                 except Exception as e:
-                    print(f"ERROR: Failed to parse date_to '{filters.get('date_to')}': {e}")
+                    logger.error(f"Failed to parse date_to '{filters.get('date_to')}': {e}")
                     range_q['lte'] = filters['date_to']
             must.append({"range": {"timestamp": range_q}})
         
+        # Company isolation
+        if filters.get('company_id'):
+            must.append({"term": {"company_id": filters['company_id']}})
+
         # Docker specific filters
         if filters.get('source'):
             must.append({"term": {"metadata.source": filters['source']}})
         if filters.get('container_name'):
             must.append({"term": {"metadata.container_name": filters['container_name']}})
-            
+
         if search_query:
             must.append({"multi_match": {"query": search_query, "fields": ["message^2", "stack_trace", "tags"]}})
         return must
@@ -305,7 +309,7 @@ class LogStore:
                         dt_val = dt_val.replace(tzinfo=dt_timezone.utc)
                     ts_query['$gte'] = dt_val
                 except Exception as e:
-                    print(f"ERROR: Failed to parse date_from '{filters.get('date_from')}': {e}")
+                    logger.error(f"Failed to parse date_from '{filters.get('date_from')}': {e}")
                     ts_query['$gte'] = filters['date_from']
             if filters.get('date_to'):
                 try:
@@ -316,21 +320,27 @@ class LogStore:
                         dt_val = dt_val.replace(tzinfo=dt_timezone.utc)
                     ts_query['$lte'] = dt_val
                 except Exception as e:
-                    print(f"ERROR: Failed to parse date_to '{filters.get('date_to')}': {e}")
+                    logger.error(f"Failed to parse date_to '{filters.get('date_to')}': {e}")
                     ts_query['$lte'] = filters['date_to']
             if ts_query:
                 query['timestamp'] = ts_query
         
+        # Company isolation
+        if filters.get('company_id'):
+            query['company_id'] = filters['company_id']
+
         # Docker specific filters
         if filters.get('source'):
             query['metadata.source'] = filters['source']
         if filters.get('container_name'):
             query['metadata.container_name'] = filters['container_name']
-            
+
         if search_query:
+            import re as _re
+            escaped = _re.escape(search_query)
             query['$or'] = [
-                {'message': {'$regex': search_query, '$options': 'i'}},
-                {'stack_trace': {'$regex': search_query, '$options': 'i'}}
+                {'message': {'$regex': escaped, '$options': 'i'}},
+                {'stack_trace': {'$regex': escaped, '$options': 'i'}}
             ]
         return query
 
@@ -416,7 +426,7 @@ class LogStore:
         for b in paged_buckets:
             log = b['sample_log']['hits']['hits'][0]['_source']
             log['count'] = b['doc_count']
-            log['grouped_hash'] = b['key']['group']
+            log['grouped_hash'] = b['key']
             # Convert numeric timestamps from ES to ISO strings if needed
             log['first_seen'] = b['earliest_timestamp'].get('value_as_string') or str(b['earliest_timestamp'].get('value', ''))
             log['last_seen'] = b['latest_timestamp'].get('value_as_string') or str(b['latest_timestamp'].get('value', ''))
@@ -497,29 +507,21 @@ class LogStore:
                 pass
         await self.mongo_db.logs.delete_one({"id": log_id})
 
-    async def get_stats(self, project_id=None, user_id=None, allowed_project_ids=None, is_admin=False):
+    async def get_stats(self, project_id=None, allowed_project_ids=None, company_id=None):
         if self.es_available:
-            return await self._es_get_stats(project_id, user_id, allowed_project_ids, is_admin)
-        return await self._mongo_get_stats(project_id, user_id, allowed_project_ids, is_admin)
+            return await self._es_get_stats(project_id, allowed_project_ids, company_id)
+        return await self._mongo_get_stats(project_id, allowed_project_ids, company_id)
 
-    async def _mongo_get_stats(self, project_id, user_id, allowed_project_ids, is_admin):
+    async def _mongo_get_stats(self, project_id, allowed_project_ids, company_id=None):
         match_query = {}
         if project_id:
             match_query['project_id'] = project_id
-        elif not is_admin:
-            if allowed_project_ids is not None:
-                if not allowed_project_ids:
-                    return {"total": 0, "by_level": {}, "by_project": {}, "timeline": []}
-                match_query['project_id'] = {"$in": allowed_project_ids}
-            elif user_id:
-                user_projects = await self.mongo_db.projects.find(
-                    {"user_id": user_id}, {"_id": 0, "id": 1}
-                ).to_list(100)
-                project_ids = [p['id'] for p in user_projects]
-                if project_ids:
-                    match_query['project_id'] = {"$in": project_ids}
-                else:
-                    return {"total": 0, "by_level": {}, "by_project": {}, "timeline": []}
+        elif allowed_project_ids is not None:
+            if not allowed_project_ids:
+                return {"total": 0, "by_level": {}, "by_project": {}, "timeline": []}
+            match_query['project_id'] = {"$in": allowed_project_ids}
+        if company_id:
+            match_query['company_id'] = company_id
 
         # 1. Aggregation for Levels
         pipeline_level = [{"$match": match_query}, {"$group": {"_id": "$level", "count": {"$sum": 1}}}]
@@ -568,12 +570,15 @@ class LogStore:
             "timeline": timeline
         }
 
-    async def _es_get_stats(self, project_id, user_id, allowed_project_ids, is_admin):
+    async def _es_get_stats(self, project_id, allowed_project_ids, company_id=None):
         # Build filter same as _build_es_must
         filters = {}
-        if project_id: filters['project_id'] = project_id
-        elif not is_admin and allowed_project_ids is not None:
-            filters['project_id'] = allowed_project_ids
+        if project_id:
+            filters['project_id'] = project_id
+        elif allowed_project_ids is not None:
+            filters['project_ids'] = allowed_project_ids
+        if company_id:
+            filters['company_id'] = company_id
             
         must = self._build_es_must(filters, None)
         query = {"bool": {"must": must}} if must else {"match_all": {}}
@@ -640,7 +645,7 @@ class LogStore:
         except Exception as e:
             logger.error(f"Elasticsearch get_stats failed: {e}")
             # Fallback to MongoDB if ES fails during stats
-            return await self._mongo_get_stats(project_id, user_id, allowed_project_ids, is_admin)
+            return await self._mongo_get_stats(project_id, allowed_project_ids)
 
     async def close(self):
         if self.es and self.es_available:

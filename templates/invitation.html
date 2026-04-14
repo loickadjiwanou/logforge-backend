@@ -1,0 +1,92 @@
+{% extends "base_email.html" %}
+
+{% block extra_style %}
+    .invite-box {
+        text-align: center;
+        padding: 10px 0 20px 0;
+    }
+    .invite-icon {
+        font-size: 48px;
+        margin-bottom: 16px;
+    }
+    .company-card {
+        background: #f9fafb;
+        border: 1px solid #e5e7eb;
+        border-radius: 10px;
+        padding: 16px 24px;
+        margin: 24px 0;
+        text-align: center;
+    }
+    .company-label {
+        color: #6b7280;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-weight: 600;
+        margin: 0 0 6px 0;
+    }
+    .company-name {
+        color: #111827;
+        font-size: 20px;
+        font-weight: 700;
+        margin: 0;
+    }
+    .invite-button {
+        display: inline-block;
+        padding: 14px 32px;
+        background-color: {{ branding.primary_color }};
+        color: #ffffff !important;
+        text-decoration: none;
+        border-radius: 8px;
+        font-weight: 700;
+        font-size: 16px;
+        margin: 20px 0;
+        box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
+    }
+    .expiry-note {
+        font-size: 12px;
+        color: #9ca3af;
+        font-style: italic;
+        margin-top: 16px;
+    }
+    .invite-link {
+        word-break: break-all;
+        color: {{ branding.primary_color }};
+        font-size: 12px;
+    }
+{% endblock %}
+
+{% block header_content %}
+<span style="display:inline-block; padding: 4px 14px; background-color: {{ branding.primary_color }}20; color: {{ branding.primary_color }}; border-radius: 9999px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;">
+    {{ translations.invitation.badge }}
+</span>
+{% endblock %}
+
+{% block content %}
+    <div class="invite-box">
+        <div class="invite-icon">✉️</div>
+        <h2 style="color: #111827; margin: 0 0 12px 0; font-size: 22px;">{{ translations.invitation.title }}</h2>
+        <p style="color: #374151; font-size: 15px; line-height: 1.7; margin: 0 0 4px 0;">
+            {{ translations.invitation.body_intro.format(inviter=invited_by_name) }}
+        </p>
+        <p style="color: #6b7280; font-size: 14px; margin: 0;">
+            {{ translations.invitation.body_sub }}
+        </p>
+
+        <div class="company-card">
+            <p class="company-label">{{ translations.invitation.joining_label }}</p>
+            <p class="company-name">{{ company_name }}</p>
+        </div>
+
+        <a href="{{ invitation_link }}" class="invite-button">
+            {{ translations.invitation.cta_label }}
+        </a>
+
+        <p class="expiry-note">{{ translations.invitation.expiry_note }}</p>
+    </div>
+
+    <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid #f3f4f6; font-size: 12px; color: #9ca3af; text-align: center;">
+        <p style="margin: 0 0 4px 0;">{{ translations.invitation.link_fallback }}</p>
+        <p class="invite-link">{{ invitation_link }}</p>
+    </div>
+{% endblock %}

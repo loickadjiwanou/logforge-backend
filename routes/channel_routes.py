@@ -43,10 +43,11 @@ class ChannelListResponse(BaseModel):
             summary="List Channels",
             description="Retrieve a paginated list of channels. Optionally filtered by project ID.")
 async def list_channels(project_id: str = Query(None), page: int = Query(1, ge=1), size: int = Query(99, ge=1, le=100), user=Depends(get_current_user)):
+    company_id = user.get("company_id")
     query = {}
-    
+
     if project_id:
-        p_query = {"id": project_id}
+        p_query = {"id": project_id, "company_id": company_id}
         if user.get('role') != 'admin':
             p_query["$or"] = [
                 {"user_id": user['id']},
@@ -57,7 +58,7 @@ async def list_channels(project_id: str = Query(None), page: int = Query(1, ge=1
             raise HTTPException(status_code=404, detail="Project not found")
         query['project_id'] = project_id
     else:
-        p_query = {}
+        p_query = {"company_id": company_id}
         if user.get('role') != 'admin':
             p_query["$or"] = [
                 {"user_id": user['id']},
@@ -66,6 +67,9 @@ async def list_channels(project_id: str = Query(None), page: int = Query(1, ge=1
         projects = await db.projects.find(p_query, {"_id": 0, "id": 1}).to_list(1000)
         project_ids = [p['id'] for p in projects]
         query['project_id'] = {"$in": project_ids}
+
+    # Defense in depth: always scope channels by company_id
+    query['company_id'] = company_id
 
     total = await db.channels.count_documents(query)
     skip = (page - 1) * size
@@ -85,7 +89,8 @@ async def list_channels(project_id: str = Query(None), page: int = Query(1, ge=1
              summary="Create Channel",
              description="Create a new channel within a specific project.")
 async def create_channel(req: ChannelCreate, user=Depends(get_current_user)):
-    p_query = {"id": req.project_id}
+    company_id = user.get("company_id")
+    p_query = {"id": req.project_id, "company_id": company_id}
     if user.get('role') != 'admin':
         p_query["$or"] = [
             {"user_id": user['id']},
@@ -100,7 +105,9 @@ async def create_channel(req: ChannelCreate, user=Depends(get_current_user)):
     doc = {
         "id": channel_id, "name": req.name,
         "description": req.description,
-        "project_id": req.project_id, "created_at": now
+        "project_id": req.project_id,
+        "company_id": company_id,
+        "created_at": now
     }
     await db.channels.insert_one(doc)
     doc.pop('_id', None)
@@ -112,11 +119,12 @@ async def create_channel(req: ChannelCreate, user=Depends(get_current_user)):
             summary="Update Channel",
             description="Modify the details of an existing channel.")
 async def update_channel(channel_id: str, req: ChannelUpdate, user=Depends(get_current_user)):
-    channel = await db.channels.find_one({"id": channel_id}, {"_id": 0})
+    company_id = user.get("company_id")
+    channel = await db.channels.find_one({"id": channel_id, "company_id": company_id}, {"_id": 0})
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-        
-    p_query = {"id": channel['project_id']}
+
+    p_query = {"id": channel['project_id'], "company_id": company_id}
     if user.get('role') != 'admin':
         p_query["$or"] = [
             {"user_id": user['id']},
@@ -127,8 +135,8 @@ async def update_channel(channel_id: str, req: ChannelUpdate, user=Depends(get_c
         raise HTTPException(status_code=403, detail="Not authorized")
     update_data = {k: v for k, v in req.model_dump().items() if v is not None}
     if update_data:
-        await db.channels.update_one({"id": channel_id}, {"$set": update_data})
-    updated = await db.channels.find_one({"id": channel_id}, {"_id": 0})
+        await db.channels.update_one({"id": channel_id, "company_id": company_id}, {"$set": update_data})
+    updated = await db.channels.find_one({"id": channel_id, "company_id": company_id}, {"_id": 0})
     return updated
 
 
@@ -136,11 +144,12 @@ async def update_channel(channel_id: str, req: ChannelUpdate, user=Depends(get_c
                summary="Delete Channel",
                description="Permanently remove a channel.")
 async def delete_channel(channel_id: str, user=Depends(get_current_user)):
-    channel = await db.channels.find_one({"id": channel_id}, {"_id": 0})
+    company_id = user.get("company_id")
+    channel = await db.channels.find_one({"id": channel_id, "company_id": company_id}, {"_id": 0})
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-        
-    p_query = {"id": channel['project_id']}
+
+    p_query = {"id": channel['project_id'], "company_id": company_id}
     if user.get('role') != 'admin':
         p_query["$or"] = [
             {"user_id": user['id']},
@@ -149,5 +158,5 @@ async def delete_channel(channel_id: str, user=Depends(get_current_user)):
     project = await db.projects.find_one(p_query)
     if not project:
         raise HTTPException(status_code=403, detail="Not authorized")
-    await db.channels.delete_one({"id": channel_id})
+    await db.channels.delete_one({"id": channel_id, "company_id": company_id})
     return {"message": "Channel deleted"}

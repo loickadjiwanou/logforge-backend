@@ -19,22 +19,24 @@ async def check_expiring_keys():
     
     # 1. Find all active agent keys with an expiration date
     keys = await db.agent_keys.find({"status": "active", "expires_at": {"$ne": None}}).to_list(1000)
-    
+
     if not keys:
         logger.info("No active agent keys with expiration found.")
         return
 
-    # 2. Get all admin emails (handle missing is_active field assuming True by default)
-    admins = await db.users.find({"role": "admin", "is_active": {"$ne": False}}, {"email": 1, "_id": 0}).to_list(100)
-    admin_emails = [a["email"] for a in admins]
-    
-    if not admin_emails:
-        logger.warning("No active admin emails found. Cannot send alerts.")
-        return
-
     now = datetime.now(timezone.utc)
-    
+
     for key in keys:
+        # Resolve company-scoped admin emails for this key
+        company_id = key.get("company_id")
+        admin_query = {"role": "admin", "is_active": {"$ne": False}}
+        if company_id:
+            admin_query["company_id"] = company_id
+        admins = await db.users.find(admin_query, {"email": 1, "_id": 0}).to_list(100)
+        admin_emails = [a["email"] for a in admins]
+        if not admin_emails:
+            logger.warning(f"No active admin emails found for company {company_id}. Skipping key {key['id']}.")
+            continue
         expires_at_str = key.get("expires_at")
         try:
             expires_at = datetime.fromisoformat(expires_at_str)
@@ -69,7 +71,8 @@ async def check_expiring_keys():
                     admin_emails=admin_emails,
                     key_description=key.get("description", "Agent Key"),
                     expires_at=expires_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
-                    days_left=time_desc
+                    days_left=time_desc,
+                    company_id=company_id
                 )
                 
                 if success:

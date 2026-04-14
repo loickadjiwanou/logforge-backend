@@ -6,8 +6,6 @@ import os
 from jinja2 import Environment, FileSystemLoader
 from database import db
 
-from database import db
-
 logger = logging.getLogger(__name__)
 
 # Base URL for links (should be configured in .env, fallback to localhost)
@@ -120,6 +118,17 @@ EMAIL_TRANSLATIONS = {
             "expiration_label": "Date d'expiration",
             "remaining_label": "Temps restant",
             "footer_text": "Veuillez générer une nouvelle clé dans les paramètres pour assurer la continuité de la collecte des logs."
+        },
+        "invitation": {
+            "subject": "Vous avez été invité à rejoindre {company} sur LogForge",
+            "badge": "Invitation",
+            "title": "Vous avez été invité !",
+            "body_intro": "{inviter} vous invite à rejoindre son espace sur LogForge.",
+            "body_sub": "Créez votre compte gratuitement en cliquant sur le bouton ci-dessous.",
+            "joining_label": "Vous allez rejoindre",
+            "cta_label": "Accepter l'invitation",
+            "expiry_note": "Ce lien expire dans 24 heures. Si vous n'attendiez pas cette invitation, ignorez cet email.",
+            "link_fallback": "Si le bouton ne fonctionne pas, copiez ce lien dans votre navigateur :"
         }
     },
     "en": {
@@ -224,17 +233,34 @@ EMAIL_TRANSLATIONS = {
             "expiration_label": "Expiration Date",
             "remaining_label": "Remaining Time",
             "footer_text": "Please generate a new key in the settings to ensure continued log collection."
+        },
+        "invitation": {
+            "subject": "You've been invited to join {company} on LogForge",
+            "badge": "Invitation",
+            "title": "You're invited!",
+            "body_intro": "{inviter} has invited you to join their workspace on LogForge.",
+            "body_sub": "Create your free account by clicking the button below.",
+            "joining_label": "You are joining",
+            "cta_label": "Accept Invitation",
+            "expiry_note": "This link expires in 24 hours. If you weren't expecting this invitation, you can safely ignore this email.",
+            "link_fallback": "If the button doesn't work, copy and paste this link into your browser:"
         }
     }
 }
 
-async def get_smtp_config():
-    """Find any globally enabled SMTP configuration."""
-    return await db.settings.find_one({"type": "smtp", "enabled": True}, {"_id": 0})
+async def get_smtp_config(company_id=None):
+    """Find the SMTP configuration for a given company (or global if not specified)."""
+    query = {"type": "smtp", "enabled": True}
+    if company_id:
+        query["company_id"] = company_id
+    return await db.settings.find_one(query, {"_id": 0})
 
-async def get_app_settings():
-    """Get global app settings."""
-    settings = await db.settings.find_one({"type": "app_settings"}, {"_id": 0})
+async def get_app_settings(company_id=None):
+    """Get app settings for a given company, falling back to global defaults."""
+    if company_id:
+        settings = await db.settings.find_one({"type": "app_settings", "company_id": company_id}, {"_id": 0})
+    else:
+        settings = await db.settings.find_one({"type": "app_settings"}, {"_id": 0})
     if not settings:
         settings = {
             "app_name": "LogForge",
@@ -244,9 +270,9 @@ async def get_app_settings():
         }
     return settings
 
-async def render_template(template_name, context, lang="en"):
+async def render_template(template_name, context, lang="en", company_id=None):
     """Render a Jinja2 template with common context."""
-    app_settings = await get_app_settings()
+    app_settings = await get_app_settings(company_id)
     branding = {
         "app_name": app_settings.get('app_name', 'LogForge'),
         "logo_url": app_settings.get('logo_url', ''),
@@ -267,14 +293,14 @@ async def render_template(template_name, context, lang="en"):
     template = template_env.get_template(template_name)
     return template.render(full_context)
 
-async def send_project_access_email(user_email, user_name, project_name, action="granted", performer_name=None):
+async def send_project_access_email(user_email, user_name, project_name, action="granted", performer_name=None, company_id=None):
     """Send an email when project access is granted or revoked."""
     try:
-        app_settings = await get_app_settings()
+        app_settings = await get_app_settings(company_id)
         if not app_settings.get('notify_project_access', True):
             return True # Feature disabled by admin
 
-        smtp_config = await get_smtp_config()
+        smtp_config = await get_smtp_config(company_id)
         if not smtp_config:
             return False
 
@@ -317,14 +343,14 @@ async def send_project_access_email(user_email, user_name, project_name, action=
         logger.error(f"Failed to send project access email: {e}")
         return False
 
-async def send_permission_change_email(user_email, user_name, permission_key, action="granted", performer_name=None):
+async def send_permission_change_email(user_email, user_name, permission_key, action="granted", performer_name=None, company_id=None):
     """Send an email when a specific permission is granted or revoked."""
     try:
-        app_settings = await get_app_settings()
+        app_settings = await get_app_settings(company_id)
         if not app_settings.get('notify_permission_change', True):
             return True # Feature disabled by admin
 
-        smtp_config = await get_smtp_config()
+        smtp_config = await get_smtp_config(company_id)
         if not smtp_config:
             return False
 
@@ -367,14 +393,14 @@ async def send_permission_change_email(user_email, user_name, permission_key, ac
         logger.error(f"Failed to send permission change email: {e}")
         return False
 
-async def send_role_change_email(user_email, user_name, new_role, performer_name=None):
+async def send_role_change_email(user_email, user_name, new_role, performer_name=None, company_id=None):
     """Send an email when a user's role is updated."""
     try:
-        app_settings = await get_app_settings()
+        app_settings = await get_app_settings(company_id)
         if not app_settings.get('notify_role_change', True):
             return True
 
-        smtp_config = await get_smtp_config()
+        smtp_config = await get_smtp_config(company_id)
         if not smtp_config: return False
 
         lang = smtp_config.get('language', 'en')
@@ -412,14 +438,14 @@ async def send_role_change_email(user_email, user_name, new_role, performer_name
         logger.error(f"Failed to send role change email: {e}")
         return False
 
-async def send_status_change_email(user_email, user_name, is_active, performer_name=None):
+async def send_status_change_email(user_email, user_name, is_active, performer_name=None, company_id=None):
     """Send an email when account status is toggled."""
     try:
-        app_settings = await get_app_settings()
+        app_settings = await get_app_settings(company_id)
         if not app_settings.get('notify_status_change', True):
             return True
 
-        smtp_config = await get_smtp_config()
+        smtp_config = await get_smtp_config(company_id)
         if not smtp_config: return False
 
         lang = smtp_config.get('language', 'en')
@@ -458,10 +484,10 @@ async def send_status_change_email(user_email, user_name, is_active, performer_n
         logger.error(f"Failed to send status change email: {e}")
         return False
 
-async def send_password_reset_email(user_email, user_name, reset_token):
+async def send_password_reset_email(user_email, user_name, reset_token, company_id=None):
     """Send an email with a password reset link."""
     try:
-        smtp_config = await get_smtp_config()
+        smtp_config = await get_smtp_config(company_id)
         if not smtp_config:
             return False
 
@@ -502,10 +528,10 @@ async def send_password_reset_email(user_email, user_name, reset_token):
         logger.error(f"Failed to send password reset email: {e}")
         return False
 
-async def send_agent_key_expiration_alert(admin_emails, key_description, expires_at, days_left):
+async def send_agent_key_expiration_alert(admin_emails, key_description, expires_at, days_left, company_id=None):
     """Send an email to admins when an agent key is about to expire."""
     try:
-        smtp_config = await get_smtp_config()
+        smtp_config = await get_smtp_config(company_id)
         if not smtp_config:
             return False
 
@@ -546,4 +572,52 @@ async def send_agent_key_expiration_alert(admin_emails, key_description, expires
         return True
     except Exception as e:
         logger.error(f"Failed to send agent key expiration alert: {e}")
+        return False
+
+
+async def send_invitation_email(invitee_email: str, company_name: str, token: str, invited_by_name: str, company_id: str = None) -> bool:
+    """Send a company invitation email with a signup link."""
+    try:
+        smtp_config = await get_smtp_config(company_id)
+        if not smtp_config:
+            return False
+
+        lang = smtp_config.get("language", "en")
+        trans = EMAIL_TRANSLATIONS[lang]["invitation"]
+
+        subject = trans["subject"].format(company=company_name)
+        invitation_link = f"{BASE_URL}/signup?token={token}"
+
+        context = {
+            "invited_by_name": invited_by_name,
+            "company_name": company_name,
+            "invitation_link": invitation_link,
+            "translations": {**EMAIL_TRANSLATIONS[lang], "invitation": trans},
+        }
+
+        html_body = await render_template("invitation.html", context, lang)
+
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = smtp_config.get("from_email", "")
+        msg["To"] = invitee_email
+        msg.set_content(
+            f"{trans['body_intro'].format(inviter=invited_by_name)}\n\n"
+            f"{trans['joining_label']}: {company_name}\n\n"
+            f"{invitation_link}"
+        )
+        msg.add_alternative(html_body, subtype="html")
+
+        await aiosmtplib.send(
+            msg,
+            hostname=smtp_config["host"],
+            port=smtp_config["port"],
+            username=smtp_config.get("username", ""),
+            password=smtp_config.get("password", ""),
+            use_tls=smtp_config.get("port") == 465,
+            start_tls=smtp_config.get("port") == 587,
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send invitation email to {invitee_email}: {e}")
         return False

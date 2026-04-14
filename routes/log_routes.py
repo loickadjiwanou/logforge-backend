@@ -171,18 +171,20 @@ async def log_worker():
     """Background worker to process log ingestion from the queue."""
     logger.info("Log ingestion worker started")
     while True:
+        log_doc = None
         try:
             log_doc = await ingestion_queue.get()
-            
+
             # 1. Automatic Channel Creation
             channel_name = log_doc.get('channel', 'default')
             project_id = log_doc.get('project_id')
-            
+
             existing_channel = await db.channels.find_one({
-                "name": channel_name, 
-                "project_id": project_id
+                "name": channel_name,
+                "project_id": project_id,
+                "company_id": log_doc.get("company_id")
             })
-            
+
             if not existing_channel:
                 channel_id = str(uuid.uuid4())
                 await db.channels.insert_one({
@@ -190,20 +192,22 @@ async def log_worker():
                     "name": channel_name,
                     "description": f"Automatically created via ingestion from {log_doc.get('project_name')}",
                     "project_id": project_id,
+                    "company_id": log_doc.get("company_id"),
                     "created_at": datetime.now(dt_timezone.utc).isoformat()
                 })
                 logger.info(f"Auto-created channel '{channel_name}' for project {project_id}")
 
             # 2. Index to Elasticsearch
             await log_store.index_log(log_doc)
-            
+
             # 3. Broadcast to relevant WebSocket project subscribers
             await ws_manager.broadcast(project_id, {"type": "new_log", "log": log_doc})
-            
-            ingestion_queue.task_done()
         except Exception as e:
             logger.error(f"Error in log worker: {e}")
             await asyncio.sleep(1)
+        finally:
+            if log_doc is not None:
+                ingestion_queue.task_done()
 
 
 @router.post("/ingest", 
@@ -225,6 +229,7 @@ async def ingest_log(req: LogIngest, request: Request, background_tasks: Backgro
         "channel": req.channel,
         "environment": req.environment or project.get('environment', 'production'),
         "project_id": project['id'], "project_name": project['name'],
+        "company_id": project.get('company_id'),
         "metadata": req.metadata, "stack_trace": req.stack_trace,
         "user_info": req.user_info, "device_info": device_info,
         "tags": req.tags, "timestamp": now, "grouped_hash": grouped_hash
@@ -260,6 +265,7 @@ async def ingest_batch(req: LogBatchIngest, request: Request, background_tasks: 
             "channel": log_req.channel,
             "environment": log_req.environment or project.get('environment', 'production'),
             "project_id": project['id'], "project_name": project['name'],
+            "company_id": project.get('company_id'),
             "metadata": log_req.metadata, "stack_trace": log_req.stack_trace,
             "user_info": log_req.user_info, "device_info": device_info,
             "tags": log_req.tags, "timestamp": now, "grouped_hash": grouped_hash
@@ -278,11 +284,12 @@ async def ingest_batch(req: LogBatchIngest, request: Request, background_tasks: 
 async def ingest_agent(req: AgentLogBatch, request: Request, background_tasks: BackgroundTasks, agent=Depends(verify_agent_key)):
     results = []
     project_cache = {}
-    
-    # Batch optimization: Fetch rules and SMTP config once
+    agent_company_id = agent.get("company_id")
+
+    # Batch optimization: Fetch company-scoped rules and SMTP config once
     try:
-        alert_rules = await db.alert_rules.find({"enabled": True}, {"_id": 0}).to_list(100)
-        smtp_config = await db.settings.find_one({"type": "smtp", "enabled": True}, {"_id": 0})
+        alert_rules = await db.alert_rules.find({"enabled": True, "company_id": agent_company_id}, {"_id": 0}).to_list(100)
+        smtp_config = await db.settings.find_one({"type": "smtp", "enabled": True, "company_id": agent_company_id}, {"_id": 0})
     except Exception as e:
         logger.error(f"Failed to fetch batch metadata: {e}")
         alert_rules = []
@@ -295,7 +302,7 @@ async def ingest_agent(req: AgentLogBatch, request: Request, background_tasks: B
             
             if pid:
                 if pid not in project_cache:
-                    project_cache[pid] = await db.projects.find_one({"id": pid}, {"_id": 0})
+                    project_cache[pid] = await db.projects.find_one({"id": pid, "company_id": agent_company_id}, {"_id": 0})
                 project = project_cache[pid]
             
             # Determine project info (use defaults for global docker logs)
@@ -320,19 +327,20 @@ async def ingest_agent(req: AgentLogBatch, request: Request, background_tasks: B
             grouped_hash = generate_log_hash(log_req.level, log_req.message, None)
 
             log_doc = {
-                "id": log_id, 
-                "level": log_req.level.lower(), 
+                "id": log_id,
+                "level": log_req.level.lower(),
                 "message": log_req.message,
                 "channel": log_req.channel,
                 "environment": env,
-                "project_id": p_id, 
+                "project_id": p_id,
                 "project_name": p_name,
-                "metadata": meta, 
+                "company_id": agent_company_id,
+                "metadata": meta,
                 "stack_trace": None,
-                "user_info": None, 
+                "user_info": None,
                 "device_info": {"ip": request.client.host if request.client else "unknown", "agent_id": agent.get('id')},
-                "tags": ["docker"], 
-                "timestamp": log_req.timestamp or now, 
+                "tags": ["docker"],
+                "timestamp": log_req.timestamp or now,
                 "grouped_hash": grouped_hash
             }
             
@@ -367,8 +375,8 @@ async def list_docker_logs(
     # Admin role or view_docker_logs permission required
     if user.get('role') != 'admin' and 'view_docker_logs' not in user.get('permissions', []):
         raise HTTPException(status_code=403, detail="Not authorized to view global docker logs")
-        
-    filters = {"source": "docker-agent"}
+
+    filters = {"source": "docker-agent", "company_id": user.get("company_id")}
     if level: filters["level"] = level.lower()
     if container_name: filters["container_name"] = container_name
     if date_from: filters["date_from"] = date_from
@@ -384,10 +392,11 @@ async def list_monitored_containers(project_id: str = Query(None), user=Depends(
     Get a unique list of container names currently monitored by Docker Agents.
     If project_id is provided, returns containers only for that project.
     """
+    company_id = user.get("company_id")
     # Permission check
     if project_id:
-        # Check if user has access to THIS project
-        p_query = {"id": project_id}
+        # Check if user has access to THIS project within their company
+        p_query = {"id": project_id, "company_id": company_id}
         if user.get('role') != 'admin':
             p_query["$or"] = [
                 {"user_id": user['id']},
@@ -401,12 +410,15 @@ async def list_monitored_containers(project_id: str = Query(None), user=Depends(
         if user.get('role') != 'admin' and 'view_docker_logs' not in user.get('permissions', []):
             raise HTTPException(status_code=403, detail="Not authorized for global Docker view")
 
-    # Build queries
-    es_query = {"term": {"metadata.source": "docker-agent"}}
-    mongo_query = {"metadata.source": "docker-agent"}
-    
+    # Build queries — always scope by company_id
+    es_query = {"bool": {"must": [
+        {"term": {"metadata.source": "docker-agent"}},
+        {"term": {"company_id": company_id}}
+    ]}}
+    mongo_query = {"metadata.source": "docker-agent", "company_id": company_id}
+
     if project_id:
-        es_query = {"bool": {"must": [es_query, {"term": {"project_id": project_id}}]}}
+        es_query["bool"]["must"].append({"term": {"project_id": project_id}})
         mongo_query["project_id"] = project_id
 
     # We use ES aggregation or MongoDB distinct/aggregate
@@ -466,6 +478,7 @@ async def ingest_gelf_http(request: Request, background_tasks: BackgroundTasks, 
             "environment": parsed_log['environment'] or project.get('environment', 'production'),
             "project_id": project['id'],
             "project_name": project['name'],
+            "company_id": project.get('company_id'),
             "metadata": parsed_log['metadata'],
             "stack_trace": parsed_log['stack_trace'],
             "user_info": None,
@@ -529,7 +542,7 @@ async def ingest_replay(req: ReplayIngest, project=Depends(verify_api_key)):
         except Exception as e:
             logger.error(f"Failed to update ES log with replay flag: {e}")
             
-    await db.logs.update_one({"id": req.log_id}, {"$set": {"has_replay": True}})
+    await db.logs.update_one({"id": req.log_id, "project_id": project['id']}, {"$set": {"has_replay": True}})
     
     return {"status": "success", "log_id": req.log_id}
 
@@ -552,9 +565,10 @@ async def list_logs(
     size: int = Query(99, ge=1, le=200),
     user=Depends(get_current_user)
 ):
+    company_id = user.get("company_id")
     filters = {}
     if project_id:
-        p_query = {"id": project_id}
+        p_query = {"id": project_id, "company_id": company_id}
         if user.get('role') != 'admin':
             p_query["$or"] = [
                 {"user_id": user['id']},
@@ -565,7 +579,7 @@ async def list_logs(
             raise HTTPException(status_code=404, detail="Project not found")
         filters['project_id'] = project_id
     else:
-        p_query = {}
+        p_query = {"company_id": company_id}
         if user.get('role') != 'admin':
             p_query["$or"] = [
                 {"user_id": user['id']},
@@ -573,11 +587,9 @@ async def list_logs(
             ]
         projects = await db.projects.find(p_query, {"_id": 0, "id": 1}).to_list(1000)
         project_ids = [p['id'] for p in projects]
-        if not project_ids and user.get('role') != 'admin':
+        if not project_ids:
             return {"logs": [], "total": 0, "page": page, "size": size}
-            
-        if project_ids:
-            filters['project_ids'] = project_ids
+        filters['project_ids'] = project_ids
 
     if level:
         filters['level'] = level
@@ -593,6 +605,7 @@ async def list_logs(
         filters['tags'] = tags.split(",")
     if grouped_hash:
         filters['grouped_hash'] = grouped_hash
+    filters['company_id'] = company_id
 
     return await log_store.search_logs(filters, page, size, search)
 
@@ -614,9 +627,10 @@ async def list_groups(
     date_to: str = Query(None),
     user=Depends(get_current_user)
 ):
+    company_id = user.get("company_id")
     filters = {}
     if project_id:
-        p_query = {"id": project_id}
+        p_query = {"id": project_id, "company_id": company_id}
         if user.get('role') != 'admin':
             p_query["$or"] = [
                 {"user_id": user['id']},
@@ -627,7 +641,7 @@ async def list_groups(
             raise HTTPException(status_code=404, detail="Project not found")
         filters['project_id'] = project_id
     else:
-        p_query = {}
+        p_query = {"company_id": company_id}
         if user.get('role') != 'admin':
             p_query["$or"] = [
                 {"user_id": user['id']},
@@ -635,11 +649,9 @@ async def list_groups(
             ]
         projects = await db.projects.find(p_query, {"_id": 0, "id": 1}).to_list(1000)
         project_ids = [p['id'] for p in projects]
-        if not project_ids and user.get('role') != 'admin':
+        if not project_ids:
             return {"groups": [], "total": 0, "page": page, "size": size}
-            
-        if project_ids:
-            filters['project_ids'] = project_ids
+        filters['project_ids'] = project_ids
 
     if level:
         filters['level'] = level
@@ -653,6 +665,7 @@ async def list_groups(
         filters['date_from'] = date_from
     if date_to:
         filters['date_to'] = date_to
+    filters['company_id'] = company_id
 
     return await log_store.search_groups(filters, page, size, search)
 
@@ -661,31 +674,31 @@ async def list_groups(
             summary="Get Log Statistics",
             description="Retrieve aggregated statistics for the dashboard, including counts by level, project, and timeline.")
 async def get_log_stats(project_id: str = Query(None), user=Depends(get_current_user)):
-    p_query = {}
+    company_id = user.get("company_id")
+    p_query = {"company_id": company_id}
     if project_id:
         p_query["id"] = project_id
-        
+
     if user.get('role') != 'admin':
-        if "$or" not in p_query:
-            p_query["$or"] = [
-                {"user_id": user['id']},
-                {"id": {"$in": user.get('allowed_projects', [])}}
-            ]
-            
+        p_query["$or"] = [
+            {"user_id": user['id']},
+            {"id": {"$in": user.get('allowed_projects', [])}}
+        ]
+
     if project_id:
         project = await db.projects.find_one(p_query)
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
-            
+
     # Need to pass list of projects to filter stats globally if no project_id
     project_ids = None
-    if not project_id and user.get('role') != 'admin':
+    if not project_id:
         projects = await db.projects.find(p_query, {"_id": 0, "id": 1}).to_list(1000)
         project_ids = [p['id'] for p in projects]
         if not project_ids:
             return {"total": 0, "by_level": {}, "by_project": {}, "timeline": []}
             
-    return await log_store.get_stats(project_id=project_id, user_id=user['id'], allowed_project_ids=project_ids, is_admin=user.get('role') == 'admin')
+    return await log_store.get_stats(project_id=project_id, allowed_project_ids=project_ids, company_id=company_id)
 
 
 @router.get("/{log_id}", 
@@ -705,15 +718,16 @@ async def get_log_detail(log_id: str, user=Depends(get_current_user)):
              raise HTTPException(status_code=403, detail="Not authorized to view global logs")
         return log
 
-    # Standard project-based access check
-    p_query = {"id": project_id}
+    # Standard project-based access check, always scoped by company
+    company_id = user.get("company_id")
+    p_query = {"id": project_id, "company_id": company_id}
     if user.get('role') != 'admin':
         p_query["$or"] = [
             {"user_id": user['id']},
             {"id": {"$in": user.get('allowed_projects', [])}}
         ]
     project = await db.projects.find_one(p_query)
-        
+
     if not project:
         raise HTTPException(status_code=403, detail="Not authorized")
     return log
@@ -728,18 +742,19 @@ async def get_log_replay(log_id: str, user=Depends(get_current_user)):
     if not log:
         raise HTTPException(status_code=404, detail="Log not found")
         
-    p_query = {"id": log['project_id']}
+    company_id = user.get("company_id")
+    p_query = {"id": log['project_id'], "company_id": company_id}
     if user.get('role') != 'admin':
         p_query["$or"] = [
             {"user_id": user['id']},
             {"id": {"$in": user.get('allowed_projects', [])}}
         ]
     project = await db.projects.find_one(p_query)
-        
+
     if not project:
         raise HTTPException(status_code=403, detail="Not authorized")
-        
-    replay = await db.replays.find_one({"log_id": log_id}, {"_id": 0})
+
+    replay = await db.replays.find_one({"log_id": log_id, "project_id": project['id']}, {"_id": 0})
     if not replay:
         raise HTTPException(status_code=404, detail="Replay not found")
         
@@ -754,14 +769,15 @@ async def delete_log(log_id: str, user=Depends(get_current_user)):
     if not log:
         raise HTTPException(status_code=404, detail="Log not found")
         
-    p_query = {"id": log['project_id']}
+    company_id = user.get("company_id")
+    p_query = {"id": log['project_id'], "company_id": company_id}
     if user.get('role') != 'admin':
         p_query["$or"] = [
             {"user_id": user['id']},
             {"id": {"$in": user.get('allowed_projects', [])}}
         ]
     project = await db.projects.find_one(p_query)
-        
+
     if not project:
         raise HTTPException(status_code=403, detail="Not authorized")
     await log_store.delete_log(log_id)
@@ -770,8 +786,14 @@ async def delete_log(log_id: str, user=Depends(get_current_user)):
 
 async def _check_alerts(log_doc, background_tasks: BackgroundTasks = None):
     try:
-        rules = await db.alert_rules.find({"enabled": True}, {"_id": 0}).to_list(100)
-        smtp_config = await db.settings.find_one({"type": "smtp", "enabled": True}, {"_id": 0})
+        company_id = log_doc.get("company_id")
+        rules_query = {"enabled": True}
+        smtp_query = {"type": "smtp", "enabled": True}
+        if company_id:
+            rules_query["company_id"] = company_id
+            smtp_query["company_id"] = company_id
+        rules = await db.alert_rules.find(rules_query, {"_id": 0}).to_list(100)
+        smtp_config = await db.settings.find_one(smtp_query, {"_id": 0})
         return _check_alerts_batch_sync(log_doc, rules, smtp_config, background_tasks)
     except Exception as e:
         logger.error(f"Alert check failed: {e}")
@@ -846,8 +868,8 @@ async def _send_alert_email(log_doc, rule, emails, smtp_config):
         from utils.email_utils import render_template, EMAIL_TRANSLATIONS, get_app_settings
         import datetime
         
-        # Get app settings for dynamic app name
-        app_settings = await get_app_settings()
+        # Get company-specific app settings for dynamic app name
+        app_settings = await get_app_settings(log_doc.get("company_id"))
         app_name = app_settings.get('app_name', 'LogForge')
 
         # SMTP specific language for emails
@@ -882,8 +904,6 @@ async def _send_alert_email(log_doc, rule, emails, smtp_config):
         msg['From'] = smtp_config.get('from_email', '')
         msg['To'] = ", ".join(emails)
         msg.set_content(f"Alert: {rule.get('name')}\nLevel: {level}\nMessage: {log_doc.get('message')}")
-        msg.add_alternative(html_body, subtype='html')
-        
         msg.add_alternative(html_body, subtype='html')
 
         await aiosmtplib.send(msg,
