@@ -1,0 +1,67 @@
+{% extends "base_email.html" %}
+
+{% block extra_style %}
+    .badge-level { background-color: {{ badge_color }}15; color: {{ badge_color }}; border: 1px solid {{ badge_color }}30; }
+    .details-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+    .details-table td { padding: 10px 0; border-bottom: 1px solid #f3f4f6; }
+    .details-table td:first-child { width: 35%; color: #6b7280; font-weight: 500; font-size: 14px; }
+    .details-table td:last-child { color: #111827; font-weight: 500; font-size: 14px; word-break: break-word; }
+    .message-box { background: #f8fafc; border-left: 4px solid {{ badge_color }}; padding: 16px; margin: 20px 0; border-radius: 0 6px 6px 0; }
+    .meta-table { width: 100%; border: 1px solid #e1e1e1; border-collapse: collapse; border-radius: 6px; overflow: hidden; font-size: 12px; margin-top: 10px; }
+    .meta-table th { padding: 8px 12px; border: 1px solid #e1e1e1; color: #64748b; background: #f8fafc; text-align: left; }
+    .meta-table td { padding: 6px 12px; border: 1px solid #e1e1e1; background: #fff; color: #1e293b; }
+{% endblock %}
+
+{% block header_content %}
+    <div style="margin-top: 5px;"><span class="badge badge-level">{{ log.level }} • {{ translations.title }}</span></div>
+{% endblock %}
+
+{% block content %}
+    <p style="font-size: 15px; color: #4b5563;">
+        {{ translations.triggered_by }}: <strong style="color: #111827;">{{ rule_name }}</strong>
+    </p>
+    
+    <table class="details-table">
+        <tr><td>{{ translations.project }}</td><td>{{ log.project_name }}</td></tr>
+        <tr><td>{{ translations.env }}</td><td><span style="text-transform: capitalize;">{{ log.environment }}</span></td></tr>
+        <tr><td>{{ translations.channel }}</td><td><code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;color:#0f172a;font-size:12px;">{{ log.channel }}</code></td></tr>
+        {% if log.metadata.container_name %}
+            <tr><td>{{ translations.container }}</td><td><code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;color:#0f172a;font-size:12px;">{{ log.metadata.container_name }}</code></td></tr>
+        {% endif %}
+        <tr><td>{{ translations.date }}</td><td>{{ log.timestamp }}</td></tr>
+    </table>
+
+    <div class="message-box">
+        <strong style="display:block; margin-bottom: 8px; color: #64748b; font-size: 12px; text-transform: uppercase;">{{ translations.message }}</strong>
+        <div style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; color: #1e293b; white-space: pre-wrap;">{{ log.message }}</div>
+    </div>
+
+    <div style="text-align: center;">
+        <a href="{{ cta_link }}" class="button">{{ translations.view_logs }}</a>
+    </div>
+
+    {% if log.metadata and log.metadata|length > (1 if log.metadata.container_name else 0) %}
+    <div style="margin-top: 25px;">
+        <strong style="color: #64748b; font-size: 12px; text-transform: uppercase; display: block; margin-bottom: 5px;">{{ translations.metadata }}</strong>
+        <table class="meta-table">
+            <thead>
+                <tr><th>Key</th><th>Value</th></tr>
+            </thead>
+            <tbody>
+                {% for k, v in log.metadata.items() %}
+                    {% if k != 'container_name' %}
+                        <tr><td>{{ k }}</td><td>{{ v }}</td></tr>
+                    {% endif %}
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    {% if log.stack_trace %}
+    <div style="margin-top: 25px;">
+        <strong style="color: #64748b; font-size: 12px; text-transform: uppercase; display: block; margin-bottom: 5px;">{{ translations.stack }}</strong>
+        <pre style="background: #f4f4f5; padding: 15px; border-radius: 6px; overflow-x: auto; font-size: 12px; color: #ef4444; border: 1px solid #e4e4e7; margin-top: 8px; font-family: ui-monospace, monospace;">{{ log.stack_trace }}</pre>
+    </div>
+    {% endif %}
+{% endblock %}

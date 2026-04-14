@@ -1,0 +1,54 @@
+# ── Python ─────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# ── Virtual environments ────────────────────────────────────────
+venv/
+.venv/
+env/
+.env_dir/
+
+# ── Environment variables ──────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Distribution / build ───────────────────────────────────────
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+
+# ── Testing & coverage ─────────────────────────────────────────
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+test_reports/
+
+# ── Type checking ──────────────────────────────────────────────
+.mypy_cache/
+.pytype/
+
+# ── Certificates & secrets ─────────────────────────────────────
+config/cert/*.crt
+config/cert/*.key
+config/cert/*.pem
+
+# ── Logs ───────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── OS ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Editors ────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.sw?
