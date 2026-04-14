@@ -5,7 +5,7 @@
     "description": "\nLogForge API provides a robust and scalable log management and ingestion platform.\nIt supports multiple ingestion protocols (HTTP, GELF UDP) and provides real-time log monitoring through WebSockets.\n\n### Features:\n* **Log Ingestion**: High-performance log capture using Elasticsearch/OpenSearch.\n* **Organization**: Manage Projects and Channels with granular permissions.\n* **Real-time**: Live log streaming via WebSockets.\n* **Security**: JWT-based authentication with role-based access control (RBAC).\n* **Multi-tenant**: Secure isolated environments per project.\n",
     "contact": {
       "name": "LogForge Support",
-      "url": "https://github.com/loickadjiwanou/log-forge"
+      "url": "https://github.com/loickadjiwanou/logforge-backend"
     },
     "license": {
       "name": "MIT"

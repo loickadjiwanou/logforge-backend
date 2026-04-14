@@ -103,7 +103,7 @@ app = FastAPI(
     version="0.1.8",
     contact={
         "name": "LogForge Support",
-        "url": "https://github.com/loickadjiwanou/log-forge",
+        "url": "https://github.com/loickadjiwanou/logforge-backend",
     },
     license_info={
         "name": "MIT",

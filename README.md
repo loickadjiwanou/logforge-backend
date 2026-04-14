@@ -106,7 +106,7 @@ See [deployment.md](deployment.md) for the full production guide including Docke
 - **Batch HTTP Ingestion** — `POST /api/logs/ingest/batch` for high-throughput clients
 - **GELF Protocol Support** — Native ingestion via HTTP and UDP (port 12201), compatible with Docker, Fluentd, and Graylog shippers
 - **Docker Agent** — Platform-wide log collection for all Docker containers with no code modification; intelligent label-based routing per project and channel
-- **Official SDKs (v0.1.8)** — `npm install logforge-js` and `pip install logforge-python[requests]`; both support batch ingestion, retry logic, user context, and exception capture
+- **Official SDKs (v0.1.9)** — `npm install @loickadj/logforge-js` and `pip install logforge-py[requests]`; both support batch ingestion, retry logic, user context, and exception capture
 
 ### Alerting & Notifications
 - **Alerting System** — Configure email notification rules (SMTP) based on log severity
