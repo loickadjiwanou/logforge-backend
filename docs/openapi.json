@@ -13,13 +13,83 @@
     "version": "0.1.9"
   },
   "paths": {
+    "/api/auth/email-lookup": {
+      "post": {
+        "tags": ["auth"],
+        "summary": "Email Lookup",
+        "description": "Step 1 of the 3-step login flow. Returns the list of company workspaces associated with an email address, without requiring a password. Use the returned company_id in the subsequent /login call.",
+        "operationId": "email_lookup_api_auth_email_lookup_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/EmailLookupRequest" }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EmailLookupResponse" }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HTTPValidationError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/invite/validate/{token}": {
+      "get": {
+        "tags": ["auth"],
+        "summary": "Validate Invitation Token",
+        "description": "Validate a company invitation token before presenting the signup form. Returns the pre-filled email and company name. Tokens expire after 24 hours.",
+        "operationId": "validate_invitation_api_auth_invite_validate_token_get",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "title": "Token" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/InvitationValidateResponse" }
+              }
+            }
+          },
+          "404": { "description": "Invitation not found or already used." },
+          "410": { "description": "Invitation link has expired." },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HTTPValidationError" }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/auth/signup": {
       "post": {
         "tags": [
           "auth"
         ],
         "summary": "User Signup",
-        "description": "Register a new user with an email and password. Returns an access token and user profile.",
+        "description": "Register a new user via a valid company invitation token. The email must match the invited address. Upon success the invitation is marked as accepted and a JWT is returned.",
         "operationId": "signup_api_auth_signup_post",
         "requestBody": {
           "content": {
@@ -61,7 +131,7 @@
           "auth"
         ],
         "summary": "User Login",
-        "description": "Authenticate with email and password. Returns a JWT access token.",
+        "description": "Step 3 of the 3-step login flow. Authenticate with email, password, and company_id. The company_id must be resolved first via /api/auth/email-lookup. Returns a scoped JWT access token.",
         "operationId": "login_api_auth_login_post",
         "requestBody": {
           "content": {
@@ -2801,6 +2871,159 @@
         }
       }
     },
+    "/api/invitations/": {
+      "get": {
+        "tags": ["invitations"],
+        "summary": "List Invitations",
+        "description": "List all invitations for the current admin's company. Invitation tokens are never exposed in the response.",
+        "operationId": "list_invitations_api_invitations_get",
+        "security": [{ "HTTPBearer": [] }],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "invitations": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/InvitationItem" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "description": "Not authenticated." },
+          "403": { "description": "Admin access required." }
+        }
+      },
+      "post": {
+        "tags": ["invitations"],
+        "summary": "Create Invitations",
+        "description": "Send invitation emails to one or more addresses. Requires SMTP to be configured and enabled. Tokens expire after 24 hours. Returns the status per email (invited, already_member, already_invited).",
+        "operationId": "create_invitations_api_invitations_post",
+        "security": [{ "HTTPBearer": [] }],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/InviteRequest" }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "email": { "type": "string" },
+                          "status": {
+                            "type": "string",
+                            "enum": ["invited", "already_member", "already_invited"]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "description": "Not authenticated." },
+          "403": { "description": "Admin access required." },
+          "422": {
+            "description": "SMTP not configured or validation error.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HTTPValidationError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/invitations/{invitation_id}": {
+      "delete": {
+        "tags": ["invitations"],
+        "summary": "Delete Invitation",
+        "description": "Cancel and permanently delete an invitation. Only admins of the same company can delete their own company's invitations.",
+        "operationId": "delete_invitation_api_invitations_invitation_id_delete",
+        "security": [{ "HTTPBearer": [] }],
+        "parameters": [
+          {
+            "name": "invitation_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "title": "Invitation Id" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string", "example": "Invitation deleted." }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "description": "Not authenticated." },
+          "403": { "description": "Admin access required." },
+          "404": { "description": "Invitation not found." }
+        }
+      }
+    },
+    "/api/invitations/{invitation_id}/resend": {
+      "post": {
+        "tags": ["invitations"],
+        "summary": "Resend Invitation",
+        "description": "Generate a fresh token and resend the invitation email. Resets the 24-hour expiry window. Requires SMTP to be configured.",
+        "operationId": "resend_invitation_api_invitations_invitation_id_resend_post",
+        "security": [{ "HTTPBearer": [] }],
+        "parameters": [
+          {
+            "name": "invitation_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "title": "Invitation Id" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string", "example": "Invitation resent." }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "Invitation already accepted." },
+          "401": { "description": "Not authenticated." },
+          "403": { "description": "Admin access required." },
+          "404": { "description": "Invitation not found." },
+          "422": { "description": "SMTP not configured." }
+        }
+      }
+    },
     "/api/health": {
       "get": {
         "summary": "Health Check",
@@ -2872,6 +3095,38 @@
   },
   "components": {
     "schemas": {
+      "InviteRequest": {
+        "type": "object",
+        "required": ["emails"],
+        "title": "InviteRequest",
+        "properties": {
+          "emails": {
+            "type": "array",
+            "items": { "type": "string", "format": "email" },
+            "title": "Emails",
+            "description": "List of email addresses to invite."
+          }
+        }
+      },
+      "InvitationItem": {
+        "type": "object",
+        "title": "InvitationItem",
+        "properties": {
+          "id": { "type": "string", "title": "Id" },
+          "email": { "type": "string", "title": "Email" },
+          "company_id": { "type": "string", "title": "Company Id" },
+          "company_name": { "type": "string", "title": "Company Name" },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "accepted", "expired"],
+            "title": "Status"
+          },
+          "invited_by": { "type": "string", "title": "Invited By" },
+          "invited_by_name": { "type": "string", "title": "Invited By Name" },
+          "created_at": { "type": "string", "format": "date-time", "title": "Created At" },
+          "expires_at": { "type": "string", "format": "date-time", "title": "Expires At" }
+        }
+      },
       "AgentKeyCreate": {
         "properties": {
           "description": {
@@ -4028,6 +4283,11 @@
           "password": {
             "type": "string",
             "title": "Password"
+          },
+          "company_id": {
+            "type": "string",
+            "title": "Company Id",
+            "description": "The company workspace to authenticate against. Resolved via /api/auth/email-lookup. Optional if the email belongs to exactly one company."
           }
         },
         "type": "object",
@@ -4036,6 +4296,45 @@
           "password"
         ],
         "title": "LoginRequest"
+      },
+      "EmailLookupRequest": {
+        "properties": {
+          "email": {
+            "type": "string",
+            "title": "Email"
+          }
+        },
+        "type": "object",
+        "required": ["email"],
+        "title": "EmailLookupRequest"
+      },
+      "EmailLookupResponse": {
+        "properties": {
+          "companies": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string", "title": "Id" },
+                "name": { "type": "string", "title": "Name" }
+              }
+            },
+            "title": "Companies"
+          }
+        },
+        "type": "object",
+        "required": ["companies"],
+        "title": "EmailLookupResponse"
+      },
+      "InvitationValidateResponse": {
+        "properties": {
+          "email": { "type": "string", "title": "Email" },
+          "company_name": { "type": "string", "title": "Company Name" },
+          "company_id": { "type": "string", "title": "Company Id" }
+        },
+        "type": "object",
+        "required": ["email", "company_name", "company_id"],
+        "title": "InvitationValidateResponse"
       },
       "ProjectCreate": {
         "properties": {
@@ -4365,13 +4664,19 @@
           "name": {
             "type": "string",
             "title": "Name"
+          },
+          "invitation_token": {
+            "type": "string",
+            "title": "Invitation Token",
+            "description": "The token received in the company invitation email. Required to complete registration."
           }
         },
         "type": "object",
         "required": [
           "email",
           "password",
-          "name"
+          "name",
+          "invitation_token"
         ],
         "title": "SignupRequest"
       },
