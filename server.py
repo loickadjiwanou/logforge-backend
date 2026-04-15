@@ -116,7 +116,7 @@ tags_metadata = [
 app = FastAPI(
     title="LogForge API",
     description=description,
-    version="0.1.9",
+    version="0.2.0",
     contact={
         "name": "LogForge Support",
         "url": "https://github.com/loickadjiwanou/logforge-backend",
@@ -147,7 +147,7 @@ app.include_router(invitation_router, prefix="/api/invitations", tags=["invitati
 
 @app.get("/api")
 async def root():
-    return {"message": "LogForge API", "status": "running", "version": "0.1.9"}
+    return {"message": "LogForge API", "status": "running", "version": "0.2.0"}
 
 
 @app.get("/api/health")

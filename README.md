@@ -1,6 +1,6 @@
 # LogForge — Backend
 
-FastAPI backend for LogForge, the self-hosted real-time log management platform.
+FastAPI backend for LogForge, the self-hosted real-time log management platform. Version **0.2.0**.
 
 ## Tech Stack
 
@@ -148,6 +148,9 @@ See [deployment.md](deployment.md) for the full production guide including Docke
 - **Automated Channel Management** — Dynamic on-the-fly creation of new log channels on first reception
 - **Scalable Real-Time Updates** — Project-level WebSocket isolation; clients only receive events for their active project
 - **Project Identification** — Clickable project UUIDs and copy buttons across all views for easier agent setup
+
+### Desktop App
+- **Native Electron App** — LogForge ships as an installable desktop application for macOS (DMG, universal x64 + arm64), Windows (NSIS installer), and Linux (AppImage). The frontend is fully embedded — no browser required. The backend URL is configurable at runtime without rebuilding.
 
 ### Mobile
 - **Premium Mobile App** — Fully-featured iOS & Android app (React Native + Expo) with "Liquid Glass" UI (iOS), haptic feedback, and real-time log monitoring
