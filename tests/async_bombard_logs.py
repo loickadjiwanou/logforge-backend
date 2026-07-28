@@ -9,8 +9,8 @@ import random
 import time
 import json
 
-API_KEY = "lv_8e543b4dc9aaf34fc1fa4a0cd625526d68371cb6d2e742dc"
-URL = "http://localhost:8000/api/logs/ingest"
+API_KEY = "lv_1ac3a05f9db904b1c2111ec064dc4959830664c19bed23cd"
+URL = "https://logforge-backend.onrender.com/api/logs/ingest"
 
 HEADERS = {
     "Content-Type": "application/json",

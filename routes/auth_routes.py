@@ -238,7 +238,8 @@ async def update_preferences(req: UserPreferencesUpdate, user=Depends(get_curren
 async def github_oauth():
     client_id = os.environ.get('GITHUB_CLIENT_ID', '')
     if not client_id:
-        raise HTTPException(status_code=501, detail="GitHub OAuth not configured. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET in your .env file.")
+        # raise HTTPException(status_code=501, detail="GitHub OAuth not configured. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET in your .env file.")
+        raise HTTPException(status_code=501, detail="Comming soon: GitHub OAuth login is not yet available. Please use email/password login.")
     redirect_uri = os.environ.get('GITHUB_REDIRECT_URI', '')
     return {"redirect_url": f"https://github.com/login/oauth/authorize?client_id={client_id}&redirect_uri={redirect_uri}&scope=user:email"}
 
@@ -308,6 +309,7 @@ async def gitlab_oauth():
     client_id = os.environ.get('GITLAB_CLIENT_ID', '')
     if not client_id:
         raise HTTPException(status_code=501, detail="GitLab OAuth not configured. Set GITLAB_CLIENT_ID and GITLAB_CLIENT_SECRET in your .env file.")
+        raise HTTPException(status_code=501, detail="Comming soon: GitLab OAuth login is not yet available. Please use email/password login.")
     redirect_uri = os.environ.get('GITLAB_REDIRECT_URI', '')
     return {"redirect_url": f"https://gitlab.com/oauth/authorize?client_id={client_id}&redirect_uri={redirect_uri}&response_type=code&scope=read_user"}
 
